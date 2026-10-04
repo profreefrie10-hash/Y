@@ -1,0 +1,640 @@
+--[[
+    BigFroot / Luarmor Key System Bypass
+    Delta Executor Edition — mobile + UI
+
+    วิธีใช้:
+      1. execute ไฟล์นี้ก่อน
+      2. รัน BigFroot loader + ใส่คีย์จริงหนึ่งครั้ง
+      3. สคริปต์จะถูก dump ไว้
+      4. ครั้งต่อไป: execute ไฟล์นี้ — UI เด้งขึ้น กด Load Latest
+--]]
+
+local CONFIG = {
+    dump_dir = "BigFrootDumps",
+    verbose = true,
+    min_chunk_size = 500,
+    auto_load = true,
+    patterns = {
+        "bigfroot",
+        "luarmor",
+        "jnkie",
+        "bf_loader",
+    },
+}
+
+local State = {
+    original_loadstring = nil,
+    original_load = nil,
+    dumps = {},
+    count = 0,
+    session_id = tostring(os.time()),
+    ui = nil,
+}
+
+-- =========================================================
+-- Utilities
+-- =========================================================
+
+local function log(fmt, ...)
+    if CONFIG.verbose then
+        pcall(function()
+            print(("[BigFrootBypass] " .. fmt):format(...))
+        end)
+    end
+end
+
+local function detect_executor()
+    if syn then return "synapse" end
+    if secure_call or is_sirhurt_closure then return "sirhurt" end
+    if fluxus then return "fluxus" end
+    if getexecutorname then
+        local ok, name = pcall(getexecutorname)
+        if ok and type(name) == "string" then return name:lower() end
+    end
+    if identifyexecutor then
+        local ok, name = pcall(identifyexecutor)
+        if ok and type(name) == "string" then return name:lower() end
+    end
+    return "unknown"
+end
+
+local function ensure_dir(path)
+    if writefile and isfolder and makefolder then
+        local ok = pcall(function()
+            if not isfolder(path) then makefolder(path) end
+        end)
+        return ok
+    end
+    return false
+end
+
+local function safe_filename(name)
+    name = tostring(name):match("([^/\\]+)$") or tostring(name)
+    return (name:gsub("[^%w_%-%.]", "_"))
+end
+
+local function list_existing_dumps()
+    if not listfiles or not isfolder then return {} end
+    ensure_dir(CONFIG.dump_dir)
+    local out = {}
+    local ok, files = pcall(listfiles, CONFIG.dump_dir)
+    if not ok or type(files) ~= "table" then return out end
+    for _, f in ipairs(files) do
+        if f:match("%.lua$") then
+            out[#out + 1] = f
+        end
+    end
+    return out
+end
+
+local function save_dump(name, source)
+    if not writefile then
+        log("writefile ไม่พร้อม — เก็บใน getgenv().BigFrootBypass.dumps")
+        return nil
+    end
+    ensure_dir(CONFIG.dump_dir)
+    State.count = State.count + 1
+    local fname = ("%s_%s_%03d.lua"):format(
+        safe_filename(name), State.session_id, State.count
+    )
+    local path = CONFIG.dump_dir .. "/" .. fname
+    local ok = pcall(writefile, path, source)
+    if ok then
+        log("บันทึก %d bytes -> %s", #source, path)
+        return path
+    end
+    log("writefile ล้มเหลว: %s", path)
+    return nil
+end
+
+local function looks_like_real_script(chunk)
+    if type(chunk) ~= "string" then return false end
+    if #chunk < CONFIG.min_chunk_size then return false end
+    return chunk:find("game:", 1, true)
+        or chunk:find("Instance.new", 1, true)
+        or chunk:find("LocalPlayer", 1, true)
+        or chunk:find("getgenv", 1, true)
+        or chunk:find("Loadstring", 1, true)
+end
+
+local function capture(chunk, chunkname)
+    if not looks_like_real_script(chunk) then return end
+    local name = chunkname or "unnamed"
+    State.dumps[#State.dumps + 1] = {
+        name = name,
+        size = #chunk,
+        source = chunk,
+        ts = os.time(),
+    }
+    save_dump(name, chunk)
+end
+
+-- =========================================================
+-- Hooks
+-- =========================================================
+
+local function install_loadstring_hook()
+    State.original_loadstring = loadstring
+    State.original_load = load
+
+    local function make_hook(orig, label)
+        return function(chunk, chunkname)
+            if type(chunk) == "string" then
+                log("จับได้: %s (%d bytes)", chunkname or label, #chunk)
+                capture(chunk, chunkname or label)
+            end
+            return orig(chunk, chunkname)
+        end
+    end
+
+    local hooked_load = make_hook(State.original_loadstring, "loadstring")
+    local hooked_load2 = State.original_load
+        and make_hook(State.original_load, "load") or nil
+
+    if hookfunction and State.original_loadstring then
+        local ok = pcall(hookfunction, State.original_loadstring, hooked_load)
+        if not ok then loadstring = hooked_load end
+    else
+        loadstring = hooked_load
+    end
+
+    if State.original_load then
+        if hookfunction then
+            local ok = pcall(hookfunction, State.original_load, hooked_load2)
+            if not ok then load = hooked_load2 end
+        else
+            load = hooked_load2
+        end
+    end
+
+    log("ติดตั้ง hook loadstring เรียบร้อย")
+end
+
+local function matches(url)
+    if type(url) ~= "string" then return false end
+    local u = url:lower()
+    for _, pat in ipairs(CONFIG.patterns) do
+        if u:find(pat, 1, true) then return true end
+    end
+    return false
+end
+
+local function install_http_hooks()
+    if game and game.HttpGet then
+        local real = game.HttpGet
+        local hooked = function(self, url, ...)
+            if matches(url) then log("GET %s", url) end
+            return real(self, url, ...)
+        end
+        game.HttpGet = newcclosure and newcclosure(hooked) or hooked
+    end
+
+    if game and game.HttpGetAsync then
+        local real = game.HttpGetAsync
+        local hooked = function(self, url, ...)
+            if matches(url) then log("GETAsync %s", url) end
+            return real(self, url, ...)
+        end
+        game.HttpGetAsync = newcclosure and newcclosure(hooked) or hooked
+    end
+
+    local function wrap_request(orig, label)
+        return function(opts)
+            if type(opts) == "table" then
+                local u = opts.Url or opts.url
+                if matches(u) then
+                    local m = opts.Method or opts.method or "GET"
+                    log("%s %s %s", label, m, u)
+                end
+            end
+            return orig(opts)
+        end
+    end
+
+    if request then request = wrap_request(request, "request") end
+    if http_request then http_request = wrap_request(http_request, "http_request") end
+    if syn and syn.request then syn.request = wrap_request(syn.request, "syn.request") end
+    if http and http.request then http.request = wrap_request(http.request, "http.request") end
+
+    log("ติดตั้ง hook HTTP เรียบร้อย")
+end
+
+local function install_coroutine_hook()
+    if not coroutine then return end
+    local real_wrap = coroutine.wrap
+    local real_create = coroutine.create
+
+    coroutine.wrap = function(f)
+        if type(f) == "function" and debug and debug.getinfo then
+            local ok, info = pcall(debug.getinfo, f, "s")
+            if ok and info and info.source then
+                log("coroutine.wrap <- %s", info.source)
+            end
+        end
+        return real_wrap(f)
+    end
+
+    coroutine.create = function(f)
+        if type(f) == "function" and debug and debug.getinfo then
+            local ok, info = pcall(debug.getinfo, f, "s")
+            if ok and info and info.source then
+                log("coroutine.create <- %s", info.source)
+            end
+        end
+        return real_create(f)
+    end
+
+    log("ติดตั้ง hook coroutine เรียบร้อย")
+end
+
+-- =========================================================
+-- API functions
+-- =========================================================
+
+local function load_dump(index)
+    local dumps = list_existing_dumps()
+    if not dumps[index] then
+        log("ไม่มี dump ที่ index %d", index)
+        return
+    end
+    local ok, src = pcall(readfile, dumps[index])
+    if not ok or not src then
+        log("อ่านไฟล์ไม่ได้: %s", dumps[index])
+        return
+    end
+    log("รัน dump: %s", dumps[index])
+    local fn
+    if loadstring then fn = loadstring(src) end
+    if not fn and load then fn = load(src) end
+    if fn then
+        local run_ok, err = pcall(fn)
+        if not run_ok then log("error: %s", tostring(err)) end
+    else
+        log("โหลด dump ล้มเหลว")
+    end
+end
+
+local function load_dump_mem(index)
+    local d = State.dumps[index]
+    if not d then
+        log("ไม่มี dump ใน memory ที่ index %d", index)
+        return
+    end
+    log("รัน dump (mem): %s", d.name)
+    local fn = (loadstring and loadstring(d.source)) or (load and load(d.source))
+    if fn then pcall(fn) end
+end
+
+local function list_dumps()
+    local dumps = list_existing_dumps()
+    print(("[BigFrootBypass] dumps on disk: %d"):format(#dumps))
+    for i, f in ipairs(dumps) do print(("  [%d] %s"):format(i, f)) end
+    print(("[BigFrootBypass] dumps in memory: %d"):format(#State.dumps))
+    return dumps
+end
+
+local function auto_load_latest()
+    local dumps = list_existing_dumps()
+    if #dumps == 0 then return end
+    log("auto-load: %s", dumps[#dumps])
+    local ok, src = pcall(readfile, dumps[#dumps])
+    if not ok or not src then return end
+    local fn = (loadstring and loadstring(src)) or (load and load(src))
+    if fn then pcall(fn) end
+end
+
+-- =========================================================
+-- Install
+-- =========================================================
+
+local function install()
+    log("ติดตั้ง BigFroot Bypass v1.2 (Delta + UI)")
+    local ex = detect_executor()
+    log("executor: %s", ex)
+    if ex:find("delta") then
+        log("Delta mode — min_chunk_size = 300")
+        CONFIG.min_chunk_size = 300
+    end
+
+    install_loadstring_hook()
+    install_http_hooks()
+    install_coroutine_hook()
+
+    local existing = list_existing_dumps()
+    if #existing > 0 then log("พบ %d dump บนดิสก์", #existing) end
+    log("ติดตั้งเสร็จสมบูรณ์")
+end
+
+install()
+
+-- =========================================================
+-- Public API
+-- =========================================================
+
+getgenv().BigFrootBypass = {
+    config = CONFIG,
+    dumps = State.dumps,
+    save = save_dump,
+    list = list_dumps,
+    load = load_dump,
+    loadmem = load_dump_mem,
+    auto = auto_load_latest,
+    reinstall = install,
+    version = "1.2",
+}
+
+-- =========================================================
+-- Mobile UI
+-- =========================================================
+
+local function make_ui()
+    if not game then return nil end
+
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    if not LocalPlayer then return nil end
+
+    local parent
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok then parent = h end
+    end
+    if not parent then
+        local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+        if ok then parent = cg end
+    end
+    if not parent then
+        parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+
+    if parent:FindFirstChild("BigFrootUI") then
+        parent.BigFrootUI:Destroy()
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "BigFrootUI"
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = parent
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Main"
+    frame.Size = UDim2.new(0, 260, 0, 340)
+    frame.Position = UDim2.new(0, 20, 0.5, -170)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(80, 80, 110)
+    stroke.Thickness = 1
+    stroke.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -50, 0, 34)
+    title.Position = UDim2.new(0, 10, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "BigFroot Bypass v1.2"
+    title.TextColor3 = Color3.fromRGB(230, 230, 255)
+    title.TextSize = 14
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
+
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 30, 0, 30)
+    minBtn.Position = UDim2.new(1, -40, 0, 2)
+    minBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    minBtn.Text = "_"
+    minBtn.TextColor3 = Color3.fromRGB(230, 230, 255)
+    minBtn.TextSize = 16
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.Parent = frame
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -20, 0, 36)
+    status.Position = UDim2.new(0, 10, 0, 38)
+    status.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
+    status.Text = ""
+    status.TextColor3 = Color3.fromRGB(180, 220, 180)
+    status.TextSize = 11
+    status.Font = Enum.Font.Code
+    status.TextWrapped = true
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = frame
+    Instance.new("UICorner", status).CornerRadius = UDim.new(0, 6)
+    local sp = Instance.new("UIPadding", status)
+    sp.PaddingLeft = UDim.new(0, 6)
+    sp.PaddingRight = UDim.new(0, 6)
+
+    local btns = Instance.new("Frame")
+    btns.Size = UDim2.new(1, -20, 0, 70)
+    btns.Position = UDim2.new(0, 10, 0, 80)
+    btns.BackgroundTransparency = 1
+    btns.Parent = frame
+
+    local grid = Instance.new("UIGridLayout")
+    grid.CellSize = UDim2.new(0.5, -4, 0, 32)
+    grid.CellPadding = UDim2.new(0, 8, 0, 6)
+    grid.Parent = btns
+
+    local function make_btn(text, color, cb)
+        local b = Instance.new("TextButton")
+        b.BackgroundColor3 = color
+        b.Text = text
+        b.TextColor3 = Color3.fromRGB(240, 240, 255)
+        b.TextSize = 12
+        b.Font = Enum.Font.GothamSemibold
+        b.Parent = btns
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        b.MouseButton1Click:Connect(function()
+            local ok, err = pcall(cb)
+            if not ok then status.Text = "error: " .. tostring(err) end
+        end)
+        return b
+    end
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -20, 1, -200)
+    scroll.Position = UDim2.new(0, 10, 0, 155)
+    scroll.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.Parent = frame
+    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 6)
+
+    local list = Instance.new("UIListLayout")
+    list.Padding = UDim.new(0, 4)
+    list.SortOrder = Enum.SortOrder.LayoutOrder
+    list.Parent = scroll
+
+    local padding = Instance.new("UIPadding", scroll)
+    padding.PaddingLeft = UDim.new(0, 4)
+    padding.PaddingRight = UDim.new(0, 4)
+    padding.PaddingTop = UDim.new(0, 4)
+
+    local function refresh_status()
+        local B = getgenv().BigFrootBypass
+        if not B then
+            status.Text = "bypass not installed"
+            return
+        end
+        local ex = detect_executor()
+        status.Text = ("executor: %s\ndumps: mem=%d"):format(ex, #B.dumps)
+    end
+
+    local function refresh_list()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+        end
+
+        local B = getgenv().BigFrootBypass
+        local dumps = B and B.dumps or {}
+
+        if #dumps == 0 then
+            local empty = Instance.new("TextLabel")
+            empty.Size = UDim2.new(1, 0, 0, 40)
+            empty.BackgroundTransparency = 1
+            empty.Text = "ยังไม่มี dump\nรัน loader + ใส่คีย์ก่อน"
+            empty.TextColor3 = Color3.fromRGB(150, 150, 170)
+            empty.TextSize = 11
+            empty.Font = Enum.Font.Gotham
+            empty.Parent = scroll
+            scroll.CanvasSize = UDim2.new(0, 0, 0, 60)
+            return
+        end
+
+        for i, d in ipairs(dumps) do
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, -8, 0, 40)
+            row.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+            row.Text = ""
+            row.LayoutOrder = i
+            row.Parent = scroll
+            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+
+            local name = Instance.new("TextLabel")
+            name.Size = UDim2.new(1, -60, 0, 20)
+            name.Position = UDim2.new(0, 6, 0, 2)
+            name.BackgroundTransparency = 1
+            name.Text = tostring(d.name):sub(1, 32)
+            name.TextColor3 = Color3.fromRGB(220, 220, 240)
+            name.TextSize = 11
+            name.Font = Enum.Font.GothamSemibold
+            name.TextXAlignment = Enum.TextXAlignment.Left
+            name.Parent = row
+
+            local size = Instance.new("TextLabel")
+            size.Size = UDim2.new(1, -60, 0, 16)
+            size.Position = UDim2.new(0, 6, 0, 20)
+            size.BackgroundTransparency = 1
+            size.Text = tostring(d.size) .. " bytes"
+            size.TextColor3 = Color3.fromRGB(150, 150, 180)
+            size.TextSize = 10
+            size.Font = Enum.Font.Code
+            size.TextXAlignment = Enum.TextXAlignment.Left
+            size.Parent = row
+
+            row.MouseButton1Click:Connect(function()
+                status.Text = "loading #" .. i .. "..."
+                pcall(function()
+                    getgenv().BigFrootBypass.loadmem(i)
+                end)
+                status.Text = "loaded #" .. i
+            end)
+        end
+
+        scroll.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 10)
+    end
+
+    make_btn("List", Color3.fromRGB(60, 90, 140), function()
+        refresh_status()
+        refresh_list()
+    end)
+
+    make_btn("Load Latest", Color3.fromRGB(60, 130, 80), function()
+        local B = getgenv().BigFrootBypass
+        if not B then return end
+        local n = #B.dumps
+        if n == 0 then
+            status.Text = "no dump yet"
+            return
+        end
+        status.Text = "loading latest..."
+        B.loadmem(n)
+        status.Text = "loaded #" .. n
+    end)
+
+    make_btn("Reload Files", Color3.fromRGB(130, 90, 60), function()
+        local B = getgenv().BigFrootBypass
+        if not B or not listfiles then return end
+        B.dumps = {}
+        for _, f in ipairs(listfiles("BigFrootDumps")) do
+            if f:match("%.lua$") then
+                local ok, src = pcall(readfile, f)
+                if ok and src then
+                    B.dumps[#B.dumps + 1] = {
+                        name = f, size = #src, source = src, ts = os.time(),
+                    }
+                end
+            end
+        end
+        status.Text = "reloaded " .. #B.dumps .. " dumps"
+        refresh_list()
+    end)
+
+    make_btn("Clear", Color3.fromRGB(140, 60, 60), function()
+        local B = getgenv().BigFrootBypass
+        if B then B.dumps = {} end
+        refresh_list()
+        status.Text = "cleared"
+    end)
+
+    local minimized = false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        frame.Size = minimized
+            and UDim2.new(0, 260, 0, 40)
+            or  UDim2.new(0, 260, 0, 340)
+        status.Visible = not minimized
+        btns.Visible = not minimized
+        scroll.Visible = not minimized
+        minBtn.Text = minimized and "+" or "_"
+    end)
+
+    refresh_status()
+    refresh_list()
+
+    task.spawn(function()
+        while gui.Parent do
+            task.wait(2)
+            refresh_status()
+        end
+    end)
+
+    return gui
+end
+
+local ok, ui = pcall(make_ui)
+if ok and ui then
+    log("ติดตั้ง UI เรียบร้อย")
+    getgenv().BigFrootBypass.ui = ui
+    State.ui = ui
+else
+    log("UI ล้มเหลว: %s", tostring(ui))
+end
+
+-- =========================================================
+-- Auto-load ถ้าตั้งไว้
+-- =========================================================
+
+if CONFIG.auto_load then
+    pcall(auto_load_latest)
+end
+
+return getgenv().BigFrootBypass
